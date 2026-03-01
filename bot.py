@@ -43,6 +43,12 @@ TEXTS = {
         "welcome": (
             "Привет! Я скачиваю видео/аудио по ссылкам (YouTube Shorts, TikTok, Instagram Reels, Pinterest, Spotify, VK, Я.Музыка, Likee).\n\n"
             "Можно просто отправить ссылку сразу — кнопку «Скачать» нажимать не обязательно."
+            "Привет! Я помогу скачать видео/медиа из YouTube, Instagram, TikTok и других платформ.\n\n"
+            "Как пользоваться:\n"
+            "1) Нажми кнопку «Скачать видео/медиа»\n"
+            "2) Отправь ссылку\n"
+            "3) Получи файл в выбранном формате\n\n"
+            "Для работы нужна подписка на обязательный канал."
         ),
         "choose_lang": "Выберите язык:",
         "lang_saved": "Язык сохранён.",
@@ -53,6 +59,9 @@ TEXTS = {
             "• Лимит файла: 300MB\n"
             "• Форматы: auto/mp4/mkv/mp3\n"
             "• В auto видео отправляется как video (не как документ)\n"
+            "• Скачивание через yt-dlp с fallback на gallery-dl\n"
+            "• Отправка файлов до лимитов Telegram Bot API\n"
+            "• Выбор формата: auto/mp4/mkv/mp3\n"
             "• Обязательная подписка на канал"
         ),
         "need_sub": "Для использования бота подпишитесь на канал {channel} и повторите запрос.",
@@ -66,6 +75,9 @@ TEXTS = {
         "downloading": "Скачиваю медиа, подождите...",
         "sending": "Отправляю файл ({size:.1f}MB)...",
         "too_big": "Файл слишком большой: {size:.1f}MB. Лимит 300MB.",
+        "downloading": "Скачиваю медиа, подождите...",
+        "sending": "Отправляю файл ({size:.1f}MB)...",
+        "too_big": "Файл слишком большой: {size:.1f}MB. Лимит {limit}MB.",
         "done": "Готово.",
         "error": "Ошибка: {err}",
         "format_now": "Текущий формат: {fmt}",
@@ -82,6 +94,12 @@ TEXTS = {
         "welcome": (
             "Hi! I download video/audio from links (YouTube Shorts, TikTok, Instagram Reels, Pinterest, Spotify, VK, Yandex Music, Likee).\n\n"
             "You can send a link directly — no need to press Download first."
+            "Hi! I can download video/media from YouTube, Instagram, TikTok, and many other platforms.\n\n"
+            "How to use:\n"
+            "1) Tap “Download video/media”\n"
+            "2) Send a link\n"
+            "3) Receive file in your chosen format\n\n"
+            "A required channel subscription is needed before using the bot."
         ),
         "choose_lang": "Choose your language:",
         "lang_saved": "Language saved.",
@@ -92,6 +110,9 @@ TEXTS = {
             "• File limit: 300MB\n"
             "• Formats: auto/mp4/mkv/mp3\n"
             "• In auto mode video is sent as Telegram video\n"
+            "• Download via yt-dlp with gallery-dl fallback\n"
+            "• File sending up to Telegram Bot API limits\n"
+            "• Output formats: auto/mp4/mkv/mp3\n"
             "• Required channel subscription gate"
         ),
         "need_sub": "Please subscribe to {channel} and try again.",
@@ -105,6 +126,9 @@ TEXTS = {
         "downloading": "Downloading media, please wait...",
         "sending": "Uploading file ({size:.1f}MB)...",
         "too_big": "File is too large: {size:.1f}MB. Limit is 300MB.",
+        "downloading": "Downloading media, please wait...",
+        "sending": "Uploading file ({size:.1f}MB)...",
+        "too_big": "File is too large: {size:.1f}MB. Limit: {limit}MB.",
         "done": "Done.",
         "error": "Error: {err}",
         "format_now": "Current format: {fmt}",
@@ -127,6 +151,8 @@ class Config:
     required_channel: str
     ytdlp_cookies_file: Optional[str]
     concurrent_jobs: int
+    max_file_size_mb: int
+    ytdlp_cookies_file: Optional[str]
 
 
 class Storage:
@@ -242,6 +268,8 @@ def load_config() -> Config:
         required_channel=os.environ["REQUIRED_CHANNEL"],
         ytdlp_cookies_file=os.getenv("YTDLP_COOKIES_FILE") or None,
         concurrent_jobs=concurrent_jobs,
+        max_file_size_mb=int(os.getenv("MAX_FILE_SIZE_MB", "2048")),
+        ytdlp_cookies_file=os.getenv("YTDLP_COOKIES_FILE") or None,
     )
 
 
@@ -278,12 +306,17 @@ def find_latest_file(folder: Path) -> Optional[Path]:
     return files[0]
 
 
+def download_media(url: str, work_dir: Path) -> Path:
+    return download_media_with_config(url, work_dir, cookies_file=None)
+
+
 def download_media_with_config(url: str, work_dir: Path, cookies_file: Optional[str]) -> Path:
     output_template = str(work_dir / "%(title).100B-%(id)s.%(ext)s")
     ydl_opts = {
         "outtmpl": output_template,
         "noplaylist": True,
         "format": "bv*[height<=1080]+ba/b[height<=1080]/b",
+        "format": "bv*+ba/b",
         "merge_output_format": "mp4",
         "restrictfilenames": True,
         "quiet": True,
@@ -293,6 +326,9 @@ def download_media_with_config(url: str, work_dir: Path, cookies_file: Optional[
         "socket_timeout": 30,
         "concurrent_fragment_downloads": 8,
         "max_filesize": MAX_FILE_SIZE_MB * 1024 * 1024,
+        "retries": 10,
+        "fragment_retries": 10,
+        "socket_timeout": 30,
         "http_headers": {
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -314,6 +350,25 @@ def download_media_with_config(url: str, work_dir: Path, cookies_file: Optional[
         yt_error = "yt-dlp finished but no file was produced"
     except Exception as exc:
         yt_error = str(exc)
+    output_template = str(work_dir / "%(title).100B-%(id)s.%(ext)s")
+    yt_cmd = [
+        "yt-dlp",
+        "--no-playlist",
+        "-f",
+        "bv*+ba/b",
+        "--merge-output-format",
+        "mp4",
+        "--restrict-filenames",
+        "--no-warnings",
+        "-o",
+        output_template,
+        url,
+    ]
+    code, yt_log = run_command(yt_cmd)
+    if code == 0:
+        file_path = find_latest_file(work_dir)
+        if file_path:
+            return file_path
 
     gd_cmd = ["gallery-dl", "--directory", str(work_dir), "--write-metadata", url]
     gcode, gd_log = run_command(gd_cmd)
@@ -328,6 +383,13 @@ def download_media_with_config(url: str, work_dir: Path, cookies_file: Optional[
     raise RuntimeError(
         f"Download failed. yt-dlp: {(yt_error or '')[:500]} | gallery-dl: {gd_log[:500]}{hints}"
     )
+        hints = (
+            " | Hint: TikTok often requires cookies. Set YTDLP_COOKIES_FILE=/abs/path/cookies.txt"
+        )
+    raise RuntimeError(
+        f"Download failed. yt-dlp: {(yt_error or '')[:500]} | gallery-dl: {gd_log[:500]}{hints}"
+    )
+    raise RuntimeError(f"Download failed. yt-dlp: {yt_log[:350]} | gallery-dl: {gd_log[:350]}")
 
 
 def extract_url(text: str) -> Optional[str]:
@@ -442,6 +504,12 @@ def schedule_download(
 
 
 async def process_download(
+    except Exception:
+        return False
+
+
+async def handle_download(
+    update: Update,
     context: ContextTypes.DEFAULT_TYPE,
     storage: Storage,
     cfg: Config,
@@ -480,6 +548,18 @@ async def process_download(
                 else:
                     await context.bot.send_document(chat_id=chat_id, document=file_obj, caption=caption)
 
+            source = await asyncio.to_thread(download_media, url, tmp_dir)
+            fmt = storage.get_format(sender_id)
+            result = await asyncio.to_thread(ffmpeg_convert, source, fmt)
+            size_mb = result.stat().st_size / (1024 * 1024)
+            if size_mb > cfg.max_file_size_mb:
+                await status.edit_text(t(lang, "too_big", size=size_mb, limit=cfg.max_file_size_mb))
+                return
+
+            await status.edit_text(t(lang, "sending", size=size_mb))
+            extra_caption = storage.get_media_caption().strip() or t(lang, "done")
+            with result.open("rb") as file_obj:
+                await context.bot.send_document(chat_id=chat_id, document=file_obj, caption=extra_caption)
             await status.delete()
     except Exception as exc:
         await status.edit_text(t(lang, "error", err=str(exc)[:700]))
@@ -490,6 +570,7 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     cfg: Config = context.bot_data["cfg"]
 
     if not update.effective_chat or not update.effective_user or not update.message:
+    if not update.effective_chat or not update.effective_user:
         return
 
     if update.effective_chat.type != "private":
@@ -564,6 +645,16 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if text.lower() in {"cancel", "отмена"}:
             storage.clear_state(uid)
             await update.message.reply_text(t(lang, "cancelled"), reply_markup=make_menu(lang, is_owner))
+            return
+
+        if state == "awaiting_url":
+            url = extract_url(text)
+            if not url:
+                await update.message.reply_text(t(lang, "bad_link"))
+                return
+            storage.clear_state(uid)
+            await handle_download(update, context, storage, cfg, update.effective_chat.id, uid, url, lang)
+            await update.message.reply_text(t(lang, "menu"), reply_markup=make_menu(lang, is_owner))
             return
 
         if state == "awaiting_caption" and is_owner:
@@ -642,6 +733,10 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         schedule_download(context, storage, cfg, update.effective_chat.id, uid, url, lang)
         await update.message.reply_text(t(lang, "queued"))
+        url = extract_url(text)
+        if not url:
+            return
+        await handle_download(update, context, storage, cfg, update.effective_chat.id, uid, url, lang)
 
 
 def main() -> None:
@@ -653,12 +748,16 @@ def main() -> None:
     app.bot_data["storage"] = storage
     app.bot_data["download_semaphore"] = asyncio.Semaphore(cfg.concurrent_jobs)
     app.bot_data["tasks"] = set()
+    app = Application.builder().token(cfg.bot_token).build()
+    app.bot_data["cfg"] = cfg
+    app.bot_data["storage"] = storage
 
     app.add_handler(CommandHandler("start", start_handler))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
 
     print(f"Bot is running with Telegram Bot API. Concurrent jobs: {cfg.concurrent_jobs}. Limit: {MAX_FILE_SIZE_MB}MB")
+    print("Bot is running with Telegram Bot API...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 

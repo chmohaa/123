@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Optional
 
 from dotenv import load_dotenv
+from yt_dlp import YoutubeDL
 from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -115,6 +116,7 @@ class Config:
     owner_id: int
     required_channel: str
     max_file_size_mb: int
+    ytdlp_cookies_file: Optional[str]
 
 
 class Storage:
@@ -226,6 +228,7 @@ def load_config() -> Config:
         owner_id=int(os.environ["OWNER_ID"]),
         required_channel=os.environ["REQUIRED_CHANNEL"],
         max_file_size_mb=int(os.getenv("MAX_FILE_SIZE_MB", "2048")),
+        ytdlp_cookies_file=os.getenv("YTDLP_COOKIES_FILE") or None,
     )
 
 
@@ -263,6 +266,43 @@ def find_latest_file(folder: Path) -> Optional[Path]:
 
 
 def download_media(url: str, work_dir: Path) -> Path:
+    return download_media_with_config(url, work_dir, cookies_file=None)
+
+
+def download_media_with_config(url: str, work_dir: Path, cookies_file: Optional[str]) -> Path:
+    output_template = str(work_dir / "%(title).100B-%(id)s.%(ext)s")
+    ydl_opts = {
+        "outtmpl": output_template,
+        "noplaylist": True,
+        "format": "bv*+ba/b",
+        "merge_output_format": "mp4",
+        "restrictfilenames": True,
+        "quiet": True,
+        "no_warnings": True,
+        "retries": 10,
+        "fragment_retries": 10,
+        "socket_timeout": 30,
+        "http_headers": {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/127.0.0.0 Safari/537.36"
+            ),
+        },
+    }
+    if cookies_file:
+        ydl_opts["cookiefile"] = cookies_file
+
+    yt_error: Optional[str] = None
+    try:
+        with YoutubeDL(ydl_opts) as ydl:
+            ydl.extract_info(url, download=True)
+        file_path = find_latest_file(work_dir)
+        if file_path:
+            return file_path
+        yt_error = "yt-dlp finished but no file was produced"
+    except Exception as exc:
+        yt_error = str(exc)
     output_template = str(work_dir / "%(title).100B-%(id)s.%(ext)s")
     yt_cmd = [
         "yt-dlp",
@@ -290,6 +330,14 @@ def download_media(url: str, work_dir: Path) -> Path:
         if file_path:
             return file_path
 
+    hints = ""
+    if "tiktok" in url.lower() and not cookies_file:
+        hints = (
+            " | Hint: TikTok often requires cookies. Set YTDLP_COOKIES_FILE=/abs/path/cookies.txt"
+        )
+    raise RuntimeError(
+        f"Download failed. yt-dlp: {(yt_error or '')[:500]} | gallery-dl: {gd_log[:500]}{hints}"
+    )
     raise RuntimeError(f"Download failed. yt-dlp: {yt_log[:350]} | gallery-dl: {gd_log[:350]}")
 
 
@@ -365,6 +413,7 @@ async def handle_download(
     try:
         with tempfile.TemporaryDirectory(prefix="tg_dl_") as tmp:
             tmp_dir = Path(tmp)
+            source = await asyncio.to_thread(download_media_with_config, url, tmp_dir, cfg.ytdlp_cookies_file)
             source = await asyncio.to_thread(download_media, url, tmp_dir)
             fmt = storage.get_format(sender_id)
             result = await asyncio.to_thread(ffmpeg_convert, source, fmt)

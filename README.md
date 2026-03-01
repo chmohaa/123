@@ -1,3 +1,8 @@
+# Telegram Media Bot (Bot API) — made with ❤️ love ❤️ for feymova.com / t.me/feymovaq
+
+Бот для Telegram, который скачивает медиа по ссылкам (YouTube, Instagram, TikTok и др.) через `yt-dlp` + `gallery-dl` и отправляет файл в Telegram через **Telegram Bot API**. Для сложных источников (например TikTok) можно подключить cookies для `yt-dlp`.
+
+> Сделано с ❤️ любовью ❤️ специально для **feymova.com / t.me/feymovaq**.
 # Telegram Media Bot (Bot API) — made with love for feymova.com / t.me/feymovaq
 
 Бот для Telegram, который скачивает медиа по ссылкам (YouTube, Instagram, TikTok и др.) через `yt-dlp` + `gallery-dl` и отправляет файл в Telegram через **Telegram Bot API**.
@@ -18,6 +23,7 @@
   - `mkv`
   - `mp3`
 - Проверяет обязательную подписку на канал перед выдачей медиа.
+- Поддерживает optional cookies-файл для `yt-dlp` (`YTDLP_COOKIES_FILE`) — помогает со сложными источниками (TikTok/Shorts и т.д.).
 - Поддерживает **русский и английский** языки.
 - При первом `/start` просит выбрать язык через inline-кнопки.
 - Все пользовательские действия (кроме `/start`) выполняются через нижнее кнопочное меню.
@@ -73,6 +79,7 @@
   - `yt-dlp`
   - `gallery-dl`
 
+Python-зависимости устанавливаются из `requirements.txt` (включая актуальный `yt-dlp` из pip).
 Python-зависимости устанавливаются из `requirements.txt`.
 
 ---
@@ -110,6 +117,7 @@ cp .env.example .env
 - `OWNER_ID` — Telegram user ID владельца
 - `REQUIRED_CHANNEL` — канал для обязательной подписки (`@channel` или ID)
 - `MAX_FILE_SIZE_MB` — максимальный размер файла для отправки
+- `YTDLP_COOKIES_FILE` — необязательный путь к cookies.txt для сложных платформ
 
 ---
 
@@ -165,3 +173,17 @@ python bot.py
 - [ ] Проверен вызов в группе `@username_бота <ссылка>`
 - [ ] Проверена обязательная подписка на канал
 
+
+
+### Если TikTok/Shorts не скачивается
+
+1. Экспортируйте cookies в `cookies.txt` (из браузера).
+2. Укажите путь в `.env`:
+
+```env
+YTDLP_COOKIES_FILE=/opt/tg-media-bot/cookies.txt
+```
+
+3. Перезапустите бота.
+
+Это часто решает ошибки доступа/ограничений у TikTok и части YouTube Shorts.

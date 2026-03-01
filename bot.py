@@ -7,6 +7,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 from yt_dlp import YoutubeDL
@@ -31,10 +32,17 @@ from telegram.ext import (
 load_dotenv()
 
 URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
+MAX_FILE_SIZE_MB = 300
+DEFAULT_CONCURRENT_JOBS = 8
+
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".m4v"}
+AUDIO_EXTENSIONS = {".mp3", ".m4a", ".aac", ".ogg", ".opus", ".wav", ".flac"}
 
 TEXTS = {
     "ru": {
         "welcome": (
+            "Привет! Я скачиваю видео/аудио по ссылкам (YouTube Shorts, TikTok, Instagram Reels, Pinterest, Spotify, VK, Я.Музыка, Likee).\n\n"
+            "Можно просто отправить ссылку сразу — кнопку «Скачать» нажимать не обязательно."
             "Привет! Я помогу скачать видео/медиа из YouTube, Instagram, TikTok и других платформ.\n\n"
             "Как пользоваться:\n"
             "1) Нажми кнопку «Скачать видео/медиа»\n"
@@ -47,6 +55,10 @@ TEXTS = {
         "menu": "Меню открыто. Выберите действие:",
         "help": (
             "Возможности:\n"
+            "• Многопоточная обработка запросов\n"
+            "• Лимит файла: 300MB\n"
+            "• Форматы: auto/mp4/mkv/mp3\n"
+            "• В auto видео отправляется как video (не как документ)\n"
             "• Скачивание через yt-dlp с fallback на gallery-dl\n"
             "• Отправка файлов до лимитов Telegram Bot API\n"
             "• Выбор формата: auto/mp4/mkv/mp3\n"
@@ -55,6 +67,14 @@ TEXTS = {
         "need_sub": "Для использования бота подпишитесь на канал {channel} и повторите запрос.",
         "send_link": "Отправьте ссылку (http/https).",
         "bad_link": "Это не похоже на ссылку. Отправьте корректный URL.",
+        "unsupported": (
+            "Ссылка не поддерживается.\n"
+            "Поддержка: YouTube Shorts, TikTok, Instagram Reels, Pinterest, Spotify, VK Music/Clips, Яндекс Музыка, Likee."
+        ),
+        "queued": "Заявка принята в обработку ✅",
+        "downloading": "Скачиваю медиа, подождите...",
+        "sending": "Отправляю файл ({size:.1f}MB)...",
+        "too_big": "Файл слишком большой: {size:.1f}MB. Лимит 300MB.",
         "downloading": "Скачиваю медиа, подождите...",
         "sending": "Отправляю файл ({size:.1f}MB)...",
         "too_big": "Файл слишком большой: {size:.1f}MB. Лимит {limit}MB.",
@@ -72,6 +92,8 @@ TEXTS = {
     },
     "en": {
         "welcome": (
+            "Hi! I download video/audio from links (YouTube Shorts, TikTok, Instagram Reels, Pinterest, Spotify, VK, Yandex Music, Likee).\n\n"
+            "You can send a link directly — no need to press Download first."
             "Hi! I can download video/media from YouTube, Instagram, TikTok, and many other platforms.\n\n"
             "How to use:\n"
             "1) Tap “Download video/media”\n"
@@ -84,6 +106,10 @@ TEXTS = {
         "menu": "Menu opened. Choose an action:",
         "help": (
             "Features:\n"
+            "• Concurrent request processing\n"
+            "• File limit: 300MB\n"
+            "• Formats: auto/mp4/mkv/mp3\n"
+            "• In auto mode video is sent as Telegram video\n"
             "• Download via yt-dlp with gallery-dl fallback\n"
             "• File sending up to Telegram Bot API limits\n"
             "• Output formats: auto/mp4/mkv/mp3\n"
@@ -92,6 +118,14 @@ TEXTS = {
         "need_sub": "Please subscribe to {channel} and try again.",
         "send_link": "Send a link (http/https).",
         "bad_link": "This does not look like a valid URL. Send a correct link.",
+        "unsupported": (
+            "Unsupported link.\n"
+            "Supported: YouTube Shorts, TikTok, Instagram Reels, Pinterest, Spotify, VK Music/Clips, Yandex Music, Likee."
+        ),
+        "queued": "Request added to processing queue ✅",
+        "downloading": "Downloading media, please wait...",
+        "sending": "Uploading file ({size:.1f}MB)...",
+        "too_big": "File is too large: {size:.1f}MB. Limit is 300MB.",
         "downloading": "Downloading media, please wait...",
         "sending": "Uploading file ({size:.1f}MB)...",
         "too_big": "File is too large: {size:.1f}MB. Limit: {limit}MB.",
@@ -115,6 +149,8 @@ class Config:
     bot_token: str
     owner_id: int
     required_channel: str
+    ytdlp_cookies_file: Optional[str]
+    concurrent_jobs: int
     max_file_size_mb: int
     ytdlp_cookies_file: Optional[str]
 
@@ -223,10 +259,15 @@ def load_config() -> Config:
     if missing:
         raise RuntimeError(f"Missing env variables: {', '.join(missing)}")
 
+    concurrent_jobs = int(os.getenv("CONCURRENT_JOBS", str(DEFAULT_CONCURRENT_JOBS)))
+    concurrent_jobs = max(1, min(32, concurrent_jobs))
+
     return Config(
         bot_token=os.environ["BOT_TOKEN"],
         owner_id=int(os.environ["OWNER_ID"]),
         required_channel=os.environ["REQUIRED_CHANNEL"],
+        ytdlp_cookies_file=os.getenv("YTDLP_COOKIES_FILE") or None,
+        concurrent_jobs=concurrent_jobs,
         max_file_size_mb=int(os.getenv("MAX_FILE_SIZE_MB", "2048")),
         ytdlp_cookies_file=os.getenv("YTDLP_COOKIES_FILE") or None,
     )
@@ -274,11 +315,17 @@ def download_media_with_config(url: str, work_dir: Path, cookies_file: Optional[
     ydl_opts = {
         "outtmpl": output_template,
         "noplaylist": True,
+        "format": "bv*[height<=1080]+ba/b[height<=1080]/b",
         "format": "bv*+ba/b",
         "merge_output_format": "mp4",
         "restrictfilenames": True,
         "quiet": True,
         "no_warnings": True,
+        "retries": 15,
+        "fragment_retries": 15,
+        "socket_timeout": 30,
+        "concurrent_fragment_downloads": 8,
+        "max_filesize": MAX_FILE_SIZE_MB * 1024 * 1024,
         "retries": 10,
         "fragment_retries": 10,
         "socket_timeout": 30,
@@ -332,6 +379,10 @@ def download_media_with_config(url: str, work_dir: Path, cookies_file: Optional[
 
     hints = ""
     if "tiktok" in url.lower() and not cookies_file:
+        hints = " | Hint: TikTok often requires cookies in YTDLP_COOKIES_FILE"
+    raise RuntimeError(
+        f"Download failed. yt-dlp: {(yt_error or '')[:500]} | gallery-dl: {gd_log[:500]}{hints}"
+    )
         hints = (
             " | Hint: TikTok often requires cookies. Set YTDLP_COOKIES_FILE=/abs/path/cookies.txt"
         )
@@ -344,6 +395,42 @@ def download_media_with_config(url: str, work_dir: Path, cookies_file: Optional[
 def extract_url(text: str) -> Optional[str]:
     match = URL_RE.search(text)
     return match.group(0) if match else None
+
+
+def is_supported_url(url: str) -> bool:
+    try:
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower()
+        path = (parsed.path or "").lower()
+    except Exception:
+        return False
+
+    youtube_hosts = {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be"}
+    tiktok_hosts = {"tiktok.com", "www.tiktok.com", "vm.tiktok.com", "vt.tiktok.com"}
+    instagram_hosts = {"instagram.com", "www.instagram.com"}
+    pinterest_hosts = {"pinterest.com", "www.pinterest.com", "pin.it"}
+    spotify_hosts = {"spotify.com", "open.spotify.com"}
+    vk_hosts = {"vk.com", "www.vk.com", "m.vk.com", "vkvideo.ru", "www.vkvideo.ru"}
+    yandex_hosts = {"music.yandex.ru", "yandex.ru", "www.yandex.ru"}
+    likee_hosts = {"likee.video", "www.likee.video", "l.likee.video", "like-video.com"}
+
+    if host in youtube_hosts:
+        return "/shorts/" in path or host == "youtu.be"
+    if host in tiktok_hosts:
+        return True
+    if host in instagram_hosts:
+        return "/reel/" in path or "/reels/" in path
+    if host in pinterest_hosts:
+        return True
+    if host in spotify_hosts:
+        return True
+    if host in vk_hosts:
+        return True
+    if host in yandex_hosts:
+        return "music" in host or "/music" in path
+    if host in likee_hosts:
+        return True
+    return False
 
 
 def make_menu(lang: str, is_owner: bool) -> ReplyKeyboardMarkup:
@@ -390,6 +477,33 @@ async def check_subscription(context: ContextTypes.DEFAULT_TYPE, channel: str, u
             ChatMemberStatus.OWNER,
             ChatMemberStatus.RESTRICTED,
         }
+    except Exception as exc:
+        print(f"subscription check failed for {user_id} in {channel}: {exc}")
+        return False
+
+
+def schedule_download(
+    context: ContextTypes.DEFAULT_TYPE,
+    storage: Storage,
+    cfg: Config,
+    chat_id: int,
+    sender_id: int,
+    url: str,
+    lang: str,
+) -> None:
+    tasks: set[asyncio.Task] = context.bot_data["tasks"]
+    semaphore: asyncio.Semaphore = context.bot_data["download_semaphore"]
+
+    async def runner() -> None:
+        async with semaphore:
+            await process_download(context, storage, cfg, chat_id, sender_id, url, lang)
+
+    task = asyncio.create_task(runner())
+    tasks.add(task)
+    task.add_done_callback(lambda t: tasks.discard(t))
+
+
+async def process_download(
     except Exception:
         return False
 
@@ -414,6 +528,26 @@ async def handle_download(
         with tempfile.TemporaryDirectory(prefix="tg_dl_") as tmp:
             tmp_dir = Path(tmp)
             source = await asyncio.to_thread(download_media_with_config, url, tmp_dir, cfg.ytdlp_cookies_file)
+            fmt = storage.get_format(sender_id)
+            result = await asyncio.to_thread(ffmpeg_convert, source, fmt)
+
+            size_mb = result.stat().st_size / (1024 * 1024)
+            if size_mb > MAX_FILE_SIZE_MB:
+                await status.edit_text(t(lang, "too_big", size=size_mb))
+                return
+
+            await status.edit_text(t(lang, "sending", size=size_mb))
+            caption = storage.get_media_caption().strip() or t(lang, "done")
+            suffix = result.suffix.lower()
+
+            with result.open("rb") as file_obj:
+                if fmt == "auto" and suffix in VIDEO_EXTENSIONS:
+                    await context.bot.send_video(chat_id=chat_id, video=file_obj, caption=caption, supports_streaming=True)
+                elif fmt == "mp3" or suffix in AUDIO_EXTENSIONS:
+                    await context.bot.send_audio(chat_id=chat_id, audio=file_obj, caption=caption)
+                else:
+                    await context.bot.send_document(chat_id=chat_id, document=file_obj, caption=caption)
+
             source = await asyncio.to_thread(download_media, url, tmp_dir)
             fmt = storage.get_format(sender_id)
             result = await asyncio.to_thread(ffmpeg_convert, source, fmt)
@@ -435,6 +569,7 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     storage: Storage = context.bot_data["storage"]
     cfg: Config = context.bot_data["cfg"]
 
+    if not update.effective_chat or not update.effective_user or not update.message:
     if not update.effective_chat or not update.effective_user:
         return
 
@@ -543,6 +678,20 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             )
             return
 
+        direct_url = extract_url(text)
+        if direct_url:
+            if not is_supported_url(direct_url):
+                await update.message.reply_text(t(lang, "unsupported"), reply_markup=make_menu(lang, is_owner))
+                return
+            storage.clear_state(uid)
+            schedule_download(context, storage, cfg, update.effective_chat.id, uid, direct_url, lang)
+            await update.message.reply_text(t(lang, "queued"), reply_markup=make_menu(lang, is_owner))
+            return
+
+        if state == "awaiting_url":
+            await update.message.reply_text(t(lang, "bad_link"))
+            return
+
         if text in {"📥 Скачать видео/медиа", "📥 Download video/media"}:
             storage.set_state(uid, "awaiting_url")
             await update.message.reply_text(t(lang, "send_link"), reply_markup=ReplyKeyboardRemove())
@@ -574,6 +723,16 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         lower = text.lower()
         if not mention or mention not in lower:
             return
+
+        url = extract_url(text)
+        if not url:
+            return
+        if not is_supported_url(url):
+            await update.message.reply_text(t(lang, "unsupported"))
+            return
+
+        schedule_download(context, storage, cfg, update.effective_chat.id, uid, url, lang)
+        await update.message.reply_text(t(lang, "queued"))
         url = extract_url(text)
         if not url:
             return
@@ -584,6 +743,11 @@ def main() -> None:
     cfg = load_config()
     storage = Storage()
 
+    app = Application.builder().token(cfg.bot_token).concurrent_updates(True).build()
+    app.bot_data["cfg"] = cfg
+    app.bot_data["storage"] = storage
+    app.bot_data["download_semaphore"] = asyncio.Semaphore(cfg.concurrent_jobs)
+    app.bot_data["tasks"] = set()
     app = Application.builder().token(cfg.bot_token).build()
     app.bot_data["cfg"] = cfg
     app.bot_data["storage"] = storage
@@ -592,6 +756,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
 
+    print(f"Bot is running with Telegram Bot API. Concurrent jobs: {cfg.concurrent_jobs}. Limit: {MAX_FILE_SIZE_MB}MB")
     print("Bot is running with Telegram Bot API...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 

@@ -241,6 +241,7 @@ class Storage:
 
 
     def create_inline_token(self, user_id: int, url: str) -> str:
+        self.cleanup_expired_inline_tokens(ttl_hours=6)
         token = secrets.token_urlsafe(8)
         self.conn.execute(
             "INSERT OR REPLACE INTO inline_tokens (token, user_id, url) VALUES (?, ?, ?)",
@@ -249,14 +250,24 @@ class Storage:
         self.conn.commit()
         return token
 
-    def pop_inline_token(self, token: str) -> Optional[str]:
+    def get_inline_token_url(self, token: str, ttl_hours: int = 6) -> Optional[str]:
         row = self.conn.execute(
-            "SELECT url FROM inline_tokens WHERE token = ?",
-            (token,),
+            """
+            SELECT url
+            FROM inline_tokens
+            WHERE token = ?
+              AND created_at >= DATETIME('now', ?)
+            """,
+            (token, f"-{ttl_hours} hours"),
         ).fetchone()
-        self.conn.execute("DELETE FROM inline_tokens WHERE token = ?", (token,))
-        self.conn.commit()
         return row[0] if row else None
+
+    def cleanup_expired_inline_tokens(self, ttl_hours: int = 6) -> None:
+        self.conn.execute(
+            "DELETE FROM inline_tokens WHERE created_at < DATETIME('now', ?)",
+            (f"-{ttl_hours} hours",),
+        )
+        self.conn.commit()
 
 def t(lang: str, key: str, **kwargs: object) -> str:
     return TEXTS.get(lang, TEXTS["en"])[key].format(**kwargs)
@@ -553,7 +564,7 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         arg = context.args[0]
         if arg.startswith("dl_"):
             token = arg[3:]
-            url = storage.pop_inline_token(token)
+            url = storage.get_inline_token_url(token, ttl_hours=6)
             if url:
                 if not await ensure_subscription_or_notify(context, cfg, update.effective_chat.id, uid, lang):
                     return

@@ -249,10 +249,10 @@ class Storage:
         self.conn.commit()
         return token
 
-    def pop_inline_token(self, token: str, user_id: int) -> Optional[str]:
+    def pop_inline_token(self, token: str) -> Optional[str]:
         row = self.conn.execute(
-            "SELECT url FROM inline_tokens WHERE token = ? AND user_id = ?",
-            (token, user_id),
+            "SELECT url FROM inline_tokens WHERE token = ?",
+            (token,),
         ).fetchone()
         self.conn.execute("DELETE FROM inline_tokens WHERE token = ?", (token,))
         self.conn.commit()
@@ -553,7 +553,7 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         arg = context.args[0]
         if arg.startswith("dl_"):
             token = arg[3:]
-            url = storage.pop_inline_token(token, uid)
+            url = storage.pop_inline_token(token)
             if url:
                 if not await ensure_subscription_or_notify(context, cfg, update.effective_chat.id, uid, lang):
                     return

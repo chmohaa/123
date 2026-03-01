@@ -303,6 +303,25 @@ def download_media_with_config(url: str, work_dir: Path, cookies_file: Optional[
         yt_error = "yt-dlp finished but no file was produced"
     except Exception as exc:
         yt_error = str(exc)
+    output_template = str(work_dir / "%(title).100B-%(id)s.%(ext)s")
+    yt_cmd = [
+        "yt-dlp",
+        "--no-playlist",
+        "-f",
+        "bv*+ba/b",
+        "--merge-output-format",
+        "mp4",
+        "--restrict-filenames",
+        "--no-warnings",
+        "-o",
+        output_template,
+        url,
+    ]
+    code, yt_log = run_command(yt_cmd)
+    if code == 0:
+        file_path = find_latest_file(work_dir)
+        if file_path:
+            return file_path
 
     gd_cmd = ["gallery-dl", "--directory", str(work_dir), "--write-metadata", url]
     gcode, gd_log = run_command(gd_cmd)
@@ -319,6 +338,7 @@ def download_media_with_config(url: str, work_dir: Path, cookies_file: Optional[
     raise RuntimeError(
         f"Download failed. yt-dlp: {(yt_error or '')[:500]} | gallery-dl: {gd_log[:500]}{hints}"
     )
+    raise RuntimeError(f"Download failed. yt-dlp: {yt_log[:350]} | gallery-dl: {gd_log[:350]}")
 
 
 def extract_url(text: str) -> Optional[str]:
@@ -394,6 +414,7 @@ async def handle_download(
         with tempfile.TemporaryDirectory(prefix="tg_dl_") as tmp:
             tmp_dir = Path(tmp)
             source = await asyncio.to_thread(download_media_with_config, url, tmp_dir, cfg.ytdlp_cookies_file)
+            source = await asyncio.to_thread(download_media, url, tmp_dir)
             fmt = storage.get_format(sender_id)
             result = await asyncio.to_thread(ffmpeg_convert, source, fmt)
             size_mb = result.stat().st_size / (1024 * 1024)

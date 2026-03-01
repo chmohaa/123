@@ -3,6 +3,11 @@
 Бот для Telegram, который скачивает медиа по ссылкам (YouTube, Instagram, TikTok и др.) через `yt-dlp` + `gallery-dl` и отправляет файл в Telegram через **Telegram Bot API**. Для сложных источников (например TikTok) можно подключить cookies для `yt-dlp`.
 
 > Сделано с ❤️ любовью ❤️ специально для **feymova.com / t.me/feymovaq**.
+# Telegram Media Bot (Bot API) — made with love for feymova.com / t.me/feymovaq
+
+Бот для Telegram, который скачивает медиа по ссылкам (YouTube, Instagram, TikTok и др.) через `yt-dlp` + `gallery-dl` и отправляет файл в Telegram через **Telegram Bot API**.
+
+> Сделано с любовью специально для **feymova.com / t.me/feymovaq**.
 
 ---
 
@@ -75,6 +80,7 @@
   - `gallery-dl`
 
 Python-зависимости устанавливаются из `requirements.txt` (включая актуальный `yt-dlp` из pip).
+Python-зависимости устанавливаются из `requirements.txt`.
 
 ---
 

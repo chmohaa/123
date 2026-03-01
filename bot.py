@@ -4,6 +4,7 @@ import re
 import sqlite3
 import subprocess
 import tempfile
+import secrets
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -12,6 +13,8 @@ from urllib.parse import urlparse
 from dotenv import load_dotenv
 from yt_dlp import YoutubeDL
 from telegram import (
+    InlineQueryResultArticle,
+    InputTextMessageContent,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     KeyboardButton,
@@ -20,8 +23,10 @@ from telegram import (
     Update,
 )
 from telegram.constants import ChatMemberStatus
+from telegram.helpers import create_deep_linked_url
 from telegram.ext import (
     Application,
+    InlineQueryHandler,
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
@@ -42,7 +47,8 @@ TEXTS = {
     "ru": {
         "welcome": (
             "Привет! Я скачиваю видео/аудио по ссылкам (YouTube Shorts, TikTok, Instagram Reels, Pinterest, Spotify, VK, Я.Музыка, Likee).\n\n"
-            "Можно просто отправить ссылку сразу — кнопку «Скачать» нажимать не обязательно."
+            "Можно просто отправить ссылку сразу — кнопку «Скачать» нажимать не обязательно.\n"
+            "Также доступен inline-режим: @username_бота ссылка"
         ),
         "choose_lang": "Выберите язык:",
         "lang_saved": "Язык сохранён.",
@@ -81,7 +87,8 @@ TEXTS = {
     "en": {
         "welcome": (
             "Hi! I download video/audio from links (YouTube Shorts, TikTok, Instagram Reels, Pinterest, Spotify, VK, Yandex Music, Likee).\n\n"
-            "You can send a link directly — no need to press Download first."
+            "You can send a link directly — no need to press Download first.\n"
+            "Inline mode is also available: @bot_username <url>"
         ),
         "choose_lang": "Choose your language:",
         "lang_saved": "Language saved.",
@@ -160,6 +167,16 @@ class Storage:
             """
         )
         self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS inline_tokens (
+                token TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                url TEXT NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        self.conn.execute(
             "INSERT OR IGNORE INTO bot_settings (key, value) VALUES ('media_caption', '')"
         )
         self.conn.commit()
@@ -222,6 +239,24 @@ class Storage:
         )
         self.conn.commit()
 
+
+    def create_inline_token(self, user_id: int, url: str) -> str:
+        token = secrets.token_urlsafe(8)
+        self.conn.execute(
+            "INSERT OR REPLACE INTO inline_tokens (token, user_id, url) VALUES (?, ?, ?)",
+            (token, user_id, url),
+        )
+        self.conn.commit()
+        return token
+
+    def pop_inline_token(self, token: str, user_id: int) -> Optional[str]:
+        row = self.conn.execute(
+            "SELECT url FROM inline_tokens WHERE token = ? AND user_id = ?",
+            (token, user_id),
+        ).fetchone()
+        self.conn.execute("DELETE FROM inline_tokens WHERE token = ?", (token,))
+        self.conn.commit()
+        return row[0] if row else None
 
 def t(lang: str, key: str, **kwargs: object) -> str:
     return TEXTS.get(lang, TEXTS["en"])[key].format(**kwargs)
@@ -420,6 +455,20 @@ async def check_subscription(context: ContextTypes.DEFAULT_TYPE, channel: str, u
         return False
 
 
+async def ensure_subscription_or_notify(
+    context: ContextTypes.DEFAULT_TYPE,
+    cfg: Config,
+    chat_id: int,
+    user_id: int,
+    lang: str,
+) -> bool:
+    subscribed = await check_subscription(context, cfg.required_channel, user_id)
+    if not subscribed:
+        await context.bot.send_message(chat_id, t(lang, "need_sub", channel=cfg.required_channel))
+        return False
+    return True
+
+
 def schedule_download(
     context: ContextTypes.DEFAULT_TYPE,
     storage: Storage,
@@ -450,11 +499,6 @@ async def process_download(
     url: str,
     lang: str,
 ) -> None:
-    subscribed = await check_subscription(context, cfg.required_channel, sender_id)
-    if not subscribed:
-        await context.bot.send_message(chat_id, t(lang, "need_sub", channel=cfg.required_channel))
-        return
-
     status = await context.bot.send_message(chat_id, t(lang, "downloading"))
     try:
         with tempfile.TemporaryDirectory(prefix="tg_dl_") as tmp:
@@ -504,6 +548,19 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     lang = storage.get_language(uid)
+
+    if context.args:
+        arg = context.args[0]
+        if arg.startswith("dl_"):
+            token = arg[3:]
+            url = storage.pop_inline_token(token, uid)
+            if url:
+                if not await ensure_subscription_or_notify(context, cfg, update.effective_chat.id, uid, lang):
+                    return
+                schedule_download(context, storage, cfg, update.effective_chat.id, uid, url, lang)
+                await update.message.reply_text(t(lang, "queued"), reply_markup=make_menu(lang, uid == cfg.owner_id))
+                return
+
     await update.message.reply_text(t(lang, "welcome"), reply_markup=make_menu(lang, uid == cfg.owner_id))
 
 
@@ -539,6 +596,64 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         lang = storage.get_language(uid)
         await query.answer(t(lang, "format_saved", fmt=fmt), show_alert=True)
 
+
+
+async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    storage: Storage = context.bot_data["storage"]
+    cfg: Config = context.bot_data["cfg"]
+
+    query = update.inline_query
+    if not query or not query.from_user:
+        return
+
+    uid = query.from_user.id
+    storage.upsert_user(uid)
+    lang = storage.get_language(uid)
+    q = (query.query or "").strip()
+
+    if not q:
+        text = "Введите ссылку после @бота" if lang == "ru" else "Type a URL after @bot"
+        await query.answer(
+            [
+                InlineQueryResultArticle(
+                    id="empty",
+                    title=text,
+                    input_message_content=InputTextMessageContent(text),
+                )
+            ],
+            cache_time=1,
+        )
+        return
+
+    url = extract_url(q)
+    if not url or not is_supported_url(url):
+        await query.answer([], switch_pm_text=t(lang, "unsupported"), switch_pm_parameter="help", cache_time=1)
+        return
+
+    if not await check_subscription(context, cfg.required_channel, uid):
+        await query.answer([], switch_pm_text=t(lang, "need_sub", channel=cfg.required_channel), switch_pm_parameter="sub", cache_time=1)
+        return
+
+    me = await context.bot.get_me()
+    token = storage.create_inline_token(uid, url)
+    deep = create_deep_linked_url(me.username, f"dl_{token}")
+
+    title = "⬇️ Скачать через бота" if lang == "ru" else "⬇️ Download via bot"
+    desc = "Нажмите кнопку в сообщении" if lang == "ru" else "Tap the button in message"
+    btn = "Открыть бота" if lang == "ru" else "Open bot"
+
+    await query.answer(
+        [
+            InlineQueryResultArticle(
+                id=token,
+                title=title,
+                description=desc,
+                input_message_content=InputTextMessageContent(f"🔗 {url}"),
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(btn, url=deep)]]),
+            )
+        ],
+        cache_time=1,
+    )
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     storage: Storage = context.bot_data["storage"]
@@ -592,6 +707,8 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             if not is_supported_url(direct_url):
                 await update.message.reply_text(t(lang, "unsupported"), reply_markup=make_menu(lang, is_owner))
                 return
+            if not await ensure_subscription_or_notify(context, cfg, update.effective_chat.id, uid, lang):
+                return
             storage.clear_state(uid)
             schedule_download(context, storage, cfg, update.effective_chat.id, uid, direct_url, lang)
             await update.message.reply_text(t(lang, "queued"), reply_markup=make_menu(lang, is_owner))
@@ -639,6 +756,8 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if not is_supported_url(url):
             await update.message.reply_text(t(lang, "unsupported"))
             return
+        if not await ensure_subscription_or_notify(context, cfg, update.effective_chat.id, uid, lang):
+            return
 
         schedule_download(context, storage, cfg, update.effective_chat.id, uid, url, lang)
         await update.message.reply_text(t(lang, "queued"))
@@ -655,6 +774,7 @@ def main() -> None:
     app.bot_data["tasks"] = set()
 
     app.add_handler(CommandHandler("start", start_handler))
+    app.add_handler(InlineQueryHandler(inline_query_handler))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
 
